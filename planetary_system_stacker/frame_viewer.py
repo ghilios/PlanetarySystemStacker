@@ -227,6 +227,7 @@ class FrameViewer(QtWidgets.QGraphicsView):
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.setDragMode(QtWidgets.QGraphicsView.ScrollHandDrag)
         self.drag_mode = True
+        self.pixmap = None
 
         self.resized.connect(self.fitInView)
 
@@ -259,6 +260,14 @@ class FrameViewer(QtWidgets.QGraphicsView):
                              viewrect.height() / scenerect.height())
                 self.scale(factor, factor)
             self._zoom = 0
+
+    def scale(self, width_scale, height_scale):
+        if self.pixmap:
+            scaled_pixmap = self.pixmap.scaled(self.pixmap.width() * width_scale,
+                                               self.pixmap.height() * height_scale,
+                                               QtCore.Qt.KeepAspectRatio,
+                                               QtCore.Qt.SmoothTransformation)
+            self._photo.setPixmap(scaled_pixmap)
 
     def setPhoto(self, image, overlay_exclude_mark=False):
         """
@@ -312,13 +321,13 @@ class FrameViewer(QtWidgets.QGraphicsView):
             qt_image = QtGui.QImage(image_uint8, self.shape_x,
                                     self.shape_y, 3*self.shape_x, QtGui.QImage.Format_RGB888)
         pixmap = QtGui.QPixmap(qt_image)
-
         if pixmap and not pixmap.isNull():
             self._empty = False
-            self._photo.setPixmap(pixmap)
+            self.pixmap = pixmap
         else:
             self._empty = True
-            self._photo.setPixmap(QtGui.QPixmap())
+            self.pixmap = QtGui.QPixmap()
+        self._photo.setPixmap(self.pixmap)
 
         # Release the image loading flag.
         self.image_loading_busy = False

@@ -3,7 +3,7 @@ from cv2 import cvtColor, imread, COLOR_BGR2RGB, imshow, destroyAllWindows, \
 from os.path import splitext
 
 from miscellaneous import Miscellaneous
-from frames import Frames
+from frames import save_frame_image
 from exceptions import Error
 
 def test_detailed(input_file_name, shift_red, shift_blue, interpolation_factor, reduction_factor):
@@ -65,10 +65,10 @@ def create_shifted_image(input_file_name, shift_red, shift_blue, interpolation_f
                                interpolate_input=interpolation_factor,
                                reduce_output=interpolation_factor)
 
-    output_file_name= splitext(input_file_name)[0] + '_rgb-shifted.png'
-    Frames.save_image(output_file_name, shifted_image,
-                      color=(len(shifted_image.shape) == 3), avoid_overwriting=False,
-                      header="PlanetarySystemStacker")
+    output_file_name = splitext(input_file_name)[0] + '_rgb-shifted.png'
+    save_frame_image(output_file_name, shifted_image,
+                     color=(len(shifted_image.shape) == 3), avoid_overwriting=False,
+                     header="PlanetarySystemStacker")
 
 def test_auto_rgbg_align(input_file_name, interpolation_factor, blur_strength):
     # Change colors to standard RGB
@@ -83,9 +83,9 @@ def test_auto_rgbg_align(input_file_name, interpolation_factor, blur_strength):
         interpolation_factor=interpolation_factor, blur_strenght=blur_strength)
 
     output_file_name = splitext(input_file_name)[0] + '_corrected.png'
-    Frames.save_image(output_file_name, corrected_image,
-                      color=(len(corrected_image.shape) == 3), avoid_overwriting=False,
-                      header="PlanetarySystemStacker")
+    save_frame_image(output_file_name, corrected_image,
+                     color=(len(corrected_image.shape) == 3), avoid_overwriting=False,
+                     header="PlanetarySystemStacker")
 
     print("Corrections applied:")
     print("Red channel shift: (" + str(round(shift_red[0], 1)) + ", " +

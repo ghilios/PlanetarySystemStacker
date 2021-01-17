@@ -1,4 +1,4 @@
-from frames import Frames
+from frames import read_frame_image, save_frame_image
 import pyfits
 from numpy import moveaxis
 
@@ -6,14 +6,14 @@ import cv2
 from cv2 import cvtColor, COLOR_RGB2BGR, COLOR_BGR2RGB
 
 def astropy_fits(filename_in, filename_out):
-    frame = cvtColor(Frames.read_image(filename_in), COLOR_RGB2BGR)
+    frame = cvtColor(read_frame_image(filename_in), COLOR_RGB2BGR)
 
     cv2.imshow('Example - Show image in window', frame)
 
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
-    Frames.save_image(filename_out, cvtColor(frame, COLOR_BGR2RGB), color=True)
+    save_frame_image(filename_out, cvtColor(frame, COLOR_BGR2RGB), color=True)
 
 def pyfits_fits(filename_in, filename_out):
     frame = cvtColor(pyfits.getdata(filename_in), COLOR_RGB2BGR)

@@ -36,7 +36,7 @@ from numpy import uint8, uint16, float32
 from configuration import Configuration, PostprocLayer
 from exceptions import InternalError
 from frame_viewer import FrameViewer
-from frames import Frames
+from frames import save_frame_image
 from miscellaneous import Miscellaneous
 from postproc_editor_gui import Ui_postproc_editor
 from sharpening_layer_widget import Ui_sharpening_layer_widget
@@ -552,11 +552,11 @@ class VersionManagerWidget(QtWidgets.QWidget, Ui_version_manager_widget):
         # In case "correction mode" is on, process the current version image in full 16bit
         # resolution.
         self.postproc_data_object.finalize_postproc_version()
-        Frames.save_image(self.postproc_data_object.file_name_processed,
-                          self.postproc_data_object.versions[
-                              self.postproc_data_object.version_selected].image,
-                          color=self.postproc_data_object.color, avoid_overwriting=False,
-                          header=self.pss_version)
+        save_frame_image(self.postproc_data_object.file_name_processed,
+                         self.postproc_data_object.versions[
+                             self.postproc_data_object.version_selected].image,
+                         color=self.postproc_data_object.color, avoid_overwriting=False,
+                         header=self.pss_version)
 
     def save_version_as(self):
         """
@@ -573,11 +573,11 @@ class VersionManagerWidget(QtWidgets.QWidget, Ui_version_manager_widget):
 
         if filename and extension:
             self.postproc_data_object.finalize_postproc_version()
-            Frames.save_image(filename,
-                              self.postproc_data_object.versions[
-                                  self.postproc_data_object.version_selected].image,
-                              color=self.postproc_data_object.color, avoid_overwriting=False,
-                              header=self.pss_version)
+            save_frame_image(filename,
+                             self.postproc_data_object.versions[
+                                 self.postproc_data_object.version_selected].image,
+                             color=self.postproc_data_object.color, avoid_overwriting=False,
+                             header=self.pss_version)
 
 
 class BlinkComparator(QtCore.QThread):

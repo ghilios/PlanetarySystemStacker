@@ -37,7 +37,7 @@ from align_frames import AlignFrames
 from alignment_points import AlignmentPoints
 from configuration import PostprocDataObject
 from exceptions import NotSupportedError, InternalError, ArgumentError, Error
-from frames import Frames, Calibration
+from frames import save_frame_image, Calibration, read_frame_image, Frames
 from miscellaneous import Miscellaneous
 from rank_frames import RankFrames
 from stack_frames import StackFrames
@@ -481,7 +481,7 @@ class Workflow(QtCore.QObject):
         # Job type is 'postproc'.
         else:
             try:
-                self.postproc_input_image = Frames.read_image(self.postproc_input_name)
+                self.postproc_input_image = read_frame_image(self.postproc_input_name)
             except Error as e:
                 self.abort_job_signal.emit("Error: " + e.message + ", continuing with next job")
                 return
@@ -893,9 +893,9 @@ class Workflow(QtCore.QObject):
         if self.configuration.global_parameters_protocol_level > 0:
             Miscellaneous.protocol("+++ Start saving the stacked image +++", self.attached_log_file)
         self.my_timer.create_no_check('Saving the stacked image')
-        Frames.save_image(self.stacked_image_name, self.stack_frames.stacked_image,
-                          color=self.frames.color, avoid_overwriting=False,
-                          header=self.configuration.global_parameters_version)
+        save_frame_image(self.stacked_image_name, self.stack_frames.stacked_image,
+                         color=self.frames.color, avoid_overwriting=False,
+                         header=self.configuration.global_parameters_version)
         self.my_timer.stop('Saving the stacked image')
         if self.configuration.global_parameters_protocol_level > 1:
             Miscellaneous.protocol(
@@ -1032,9 +1032,9 @@ class Workflow(QtCore.QObject):
                 Miscellaneous.protocol("+++ Start saving the postprocessed image +++",
                                        self.attached_log_file)
             self.my_timer.create_no_check('Saving the postprocessed image')
-            Frames.save_image(self.postprocessed_image_name, postprocessed_image,
-                              color=(len(postprocessed_image.shape) == 3), avoid_overwriting=False,
-                              header=self.configuration.global_parameters_version)
+            save_frame_image(self.postprocessed_image_name, postprocessed_image,
+                             color=(len(postprocessed_image.shape) == 3), avoid_overwriting=False,
+                             header=self.configuration.global_parameters_version)
             self.my_timer.stop('Saving the postprocessed image')
             if self.configuration.global_parameters_protocol_level > 1:
                 Miscellaneous.protocol(

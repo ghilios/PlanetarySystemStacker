@@ -34,8 +34,9 @@ from cv2 import imwrite, moments, threshold, THRESH_BINARY, Laplacian, CV_32F, m
 from configuration import Configuration
 from exceptions import WrongOrderingError, NotSupportedError, InternalError, ArgumentError, Error
 from frames import Frames
-from miscellaneous import Miscellaneous
+from miscellaneous import Miscellaneous, translation
 from rank_frames import RankFrames
+from concurrent import futures
 
 
 class AlignFrames(object):
@@ -275,9 +276,9 @@ class AlignFrames(object):
                     # compute its translation relative to the reference.
                     frame_window = self.frames.frames_mono_blurred(idx)[
                                    self.y_low_opt:self.y_high_opt, self.x_low_opt:self.x_high_opt]
-                    self.frame_shifts[idx] = Miscellaneous.translation(self.reference_window,
-                                                                       frame_window,
-                                                                       self.reference_window_shape)
+                    self.frame_shifts[idx] = translation(self.reference_window,
+                                                         frame_window,
+                                                         self.reference_window_shape)
 
                 # Now treat all "Surface" mode cases using local search algorithms. In each case
                 # the result is the shift vector [dy_min, dx_min]. The search can fail (if within

@@ -40,7 +40,7 @@ from align_frames import AlignFrames
 from alignment_points import AlignmentPoints
 from configuration import Configuration
 from exceptions import InternalError, NotSupportedError, Error
-from frames import Frames
+from frames import save_frame_image, Frames
 from miscellaneous import Miscellaneous
 from rank_frames import RankFrames
 from timer import timer
@@ -868,8 +868,8 @@ if __name__ == "__main__":
         stack_frames.half_stacked_image_buffer_resolution()
 
     # Save the stacked image as 16bit int (color or mono).
-    Frames.save_image('Images/example_stacked.tiff', stacked_image, color=frames.color,
-                      header=configuration.global_parameters_version)
+    save_frame_image('Images/example_stacked.tiff', stacked_image, color=frames.color,
+                     header=configuration.global_parameters_version)
 
     # Convert to 8bit and show in Window.
     plt.imshow(img_as_ubyte(stacked_image))

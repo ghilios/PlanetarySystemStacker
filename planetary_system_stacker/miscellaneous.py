@@ -40,6 +40,37 @@ from scipy.ndimage import sobel
 from exceptions import DivideByZeroError, ArgumentError, Error
 
 
+def translation(frame_0, frame_1, shape):
+    """
+    Compute the translation vector of frame_1 relative to frame_0 using phase correlation.
+
+    :param frame_0: Reference frame
+    :param frame_1: Frame shifted slightly relative to frame_0
+    :param shape: Shape of frames
+    :return: [shift in y, shift in x] of frame_1 relative to frame_0. More precisely:
+             frame_1 must be shifted by this amount to register with frame_0.
+    """
+
+    # Compute the fast Fourier transforms of both frames.
+    f0 = fft2(frame_0)
+    f1 = fft2(frame_1)
+
+    # Compute the phase correlation. The resulting image has a bright peak at the pixel location
+    # which corresponds to the shift vector.
+    ir = abs(ifft2((f0 * f1.conjugate()) / (abs(f0) * abs(f1))))
+
+    # Compute the pixel coordinates of the image maximum.
+    ty, tx = unravel_index(argmax(ir), shape)
+
+    # Bring the shift values as close as possible to the coordinate origin.
+    if ty > shape[0] // 2:
+        ty -= shape[0]
+    if tx > shape[1] // 2:
+        tx -= shape[1]
+
+    return [ty, tx]
+
+
 class Miscellaneous(object):
     """
     This class provides static methods for various auxiliary purposes.
@@ -167,36 +198,6 @@ class Miscellaneous(object):
 
         return average(dnorm)
 
-    @staticmethod
-    def translation(frame_0, frame_1, shape):
-        """
-        Compute the translation vector of frame_1 relative to frame_0 using phase correlation.
-
-        :param frame_0: Reference frame
-        :param frame_1: Frame shifted slightly relative to frame_0
-        :param shape: Shape of frames
-        :return: [shift in y, shift in x] of frame_1 relative to frame_0. More precisely:
-                 frame_1 must be shifted by this amount to register with frame_0.
-        """
-
-        # Compute the fast Fourier transforms of both frames.
-        f0 = fft2(frame_0)
-        f1 = fft2(frame_1)
-
-        # Compute the phase correlation. The resulting image has a bright peak at the pixel location
-        # which corresponds to the shift vector.
-        ir = abs(ifft2((f0 * f1.conjugate()) / (abs(f0) * abs(f1))))
-
-        # Compute the pixel coordinates of the image maximum.
-        ty, tx = unravel_index(argmax(ir), shape)
-
-        # Bring the shift values as close as possible to the coordinate origin.
-        if ty > shape[0] // 2:
-            ty -= shape[0]
-        if tx > shape[1] // 2:
-            tx -= shape[1]
-
-        return [ty, tx]
 
     @staticmethod
     def multilevel_correlation(reference_box_first_phase, frame_mono_blurred,
