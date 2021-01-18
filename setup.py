@@ -36,7 +36,7 @@ setuptools.setup(
         # "Operating System :: POSIX :: Linux",
         # "Operating System :: MacOS"
     ],
-    python_requires='>=3.5, <3.7',
+    python_requires='>=3.5, <3.8',
     entry_points={
         "console_scripts": [
         "PlanetarySystemStacker=planetary_system_stacker.planetary_system_stacker:main",

@@ -39,7 +39,7 @@ from alignment_points import AlignmentPoints
 from alignment_point_editor import AlignmentPointEditorWidget
 from configuration import Configuration
 from exceptions import NotSupportedError, InternalError, Error
-from frames import Frames
+from frames import Frames, save_frame_image
 from rank_frames import RankFrames
 from stack_frames import StackFrames
 from timer import timer
@@ -221,8 +221,8 @@ def workflow(input_name, input_type='video', roi=None, automatic_ap_creation=Tru
 
     # Save the stacked image as 16bit int (color or mono).
     my_timer.create('Saving the final image')
-    Frames.save_image(stacked_image_name, stacked_image, color=frames.color,
-                      header=configuration.global_parameters_version)
+    save_frame_image(stacked_image_name, stacked_image, color=frames.color,
+                     header=configuration.global_parameters_version)
     my_timer.stop('Saving the final image')
 
     # Print out timer results.
@@ -230,8 +230,8 @@ def workflow(input_name, input_type='video', roi=None, automatic_ap_creation=Tru
     my_timer.print()
 
     # Write the image with alignment points.
-    Frames.save_image(ap_image_name, color_image_with_aps, color=True,
-                      header=configuration.global_parameters_version)
+    save_frame_image(ap_image_name, color_image_with_aps, color=True,
+                     header=configuration.global_parameters_version)
 
     # If a ROI is selected, return both the original and the reduced-size average frame.
     if roi:

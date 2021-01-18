@@ -242,6 +242,10 @@ class Configuration(object):
         self.postproc_blinking_period = 1.
         self.postproc_idle_loop_time = 0.2
 
+        # TODO: Make this off by default until it can be configured
+        self.multiproc_enabled = True
+        self.multiproc_num_processes = 4
+
         # Initialize the ConfigParser object for parameters which the user can change.
         self.config_parser_object = ConfigParser()
 

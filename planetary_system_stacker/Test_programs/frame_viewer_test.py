@@ -6,7 +6,7 @@ from numpy import uint8, uint16
 
 from exceptions import NotSupportedError
 from frame_viewer_test_gui import Ui_Frame
-from frames import Frames
+from frames import read_frame_image
 
 
 class FrameViewer(QtWidgets.QGraphicsView):
@@ -234,7 +234,7 @@ if __name__ == '__main__':
     input_file_name = "D:\SW-Development\Python\PlanetarySystemStacker\Examples\Jupiter_Richard\\" \
                       "2020-07-29-2145_3-L-Jupiter_ALTAIRGP224C_pss_p70_b48.png"
     # input_file_name = "D:\SW-Development\Python\PlanetarySystemStacker\Examples\Moon_2018-03-24\Moon_Tile-024_043939_pss_drizzle2_gpp.png"
-    input_image = Frames.read_image(input_file_name)
+    input_image = read_frame_image(input_file_name)
 
     app = QtWidgets.QApplication(argv)
 

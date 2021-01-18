@@ -46,10 +46,11 @@ class SERParser(object):
                                            this number of bits.
         """
         super().__init__()
+        self.ser_file = ser_file
 
-        self.warn_message = self.sanity_check(ser_file)
+        self.warn_message = self.sanity_check(self.ser_file)
 
-        self.fid = self.open_file(ser_file)
+        self.fid = self.open_file(self.ser_file)
 
         self.header = self.read_header()
 
@@ -79,6 +80,24 @@ class SERParser(object):
 
         self.color = 8 <= self.header['ColorID'] <= 19 and self.header['DebayerPattern'] is not None \
                      or 100 <= self.header['ColorID'] <= 101
+
+    def __getstate__(self):
+        return {
+            "ser_file": self.ser_file,
+            "warn_message": self.warn_message,
+            "frame_count": self.frame_count,
+            "frame_size": self.frame_size,
+            "shift_pixels": self.shift_pixels,
+            "PixelDepthPerPlane": self.PixelDepthPerPlane,
+            "color": self.color
+        }
+
+    def __setstate__(self, state):
+        for k, v in state.items():
+            self.__setattr__(k, v)
+
+        self.fid = self.open_file(self.ser_file)
+        self.header = self.read_header()
 
     def sanity_check(self, ser_file):
         warn_message = None

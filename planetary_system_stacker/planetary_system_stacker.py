@@ -53,7 +53,7 @@ from configuration_editor import ConfigurationEditor
 from exceptions import NotSupportedError
 from frame_selector import FrameSelectorWidget
 from frame_viewer import FrameViewerWidget
-from frames import Frames
+from frames import save_frame_image
 from job_editor import JobEditor, FileDialog
 from main_gui import Ui_MainWindow
 from miscellaneous import Miscellaneous
@@ -550,11 +550,11 @@ class PlanetarySystemStacker(QtWidgets.QMainWindow):
                                                  options=options)
 
             if master_dark_file[0]:
-                Frames.save_image(master_dark_file[0],
-                                  self.workflow.calibration.master_dark_frame,
-                                  color=self.workflow.calibration.dark_color,
-                                  avoid_overwriting=False,
-                                  header=self.configuration.global_parameters_version)
+                save_frame_image(master_dark_file[0],
+                                 self.workflow.calibration.master_dark_frame,
+                                 color=self.workflow.calibration.dark_color,
+                                 avoid_overwriting=False,
+                                 header=self.configuration.global_parameters_version)
                 # Remember the current directory for next file dialog.
                 self.configuration.hidden_parameters_current_dir = \
                     str(Path(master_dark_file[0]).parents[0])
@@ -633,11 +633,11 @@ class PlanetarySystemStacker(QtWidgets.QMainWindow):
                                                  options=options)
 
             if master_flat_file[0]:
-                Frames.save_image(master_flat_file[0],
-                                  self.workflow.calibration.master_flat_frame,
-                                  color=self.workflow.calibration.flat_color,
-                                  avoid_overwriting=False,
-                                  header=self.configuration.global_parameters_version)
+                save_frame_image(master_flat_file[0],
+                                 self.workflow.calibration.master_flat_frame,
+                                 color=self.workflow.calibration.flat_color,
+                                 avoid_overwriting=False,
+                                 header=self.configuration.global_parameters_version)
                 # Remember the current directory for next file dialog.
                 self.configuration.hidden_parameters_current_dir = str(
                     Path(master_flat_file[0]).parents[0])
@@ -1044,10 +1044,10 @@ class PlanetarySystemStacker(QtWidgets.QMainWindow):
         :return: -
         """
 
-        Frames.save_image(self.workflow.stacked_image_name,
-                          self.workflow.stack_frames.stacked_image,
-                          color=self.workflow.frames.color, avoid_overwriting=False,
-                          header=self.configuration.global_parameters_version)
+        save_frame_image(self.workflow.stacked_image_name,
+                         self.workflow.stack_frames.stacked_image,
+                         color=self.workflow.frames.color, avoid_overwriting=False,
+                         header=self.configuration.global_parameters_version)
 
     def save_result_as(self):
         """
@@ -1062,9 +1062,9 @@ class PlanetarySystemStacker(QtWidgets.QMainWindow):
             "Image Files (*png *.tiff *.fits)", options=options)
 
         if filename and extension:
-            Frames.save_image(filename, self.workflow.stack_frames.stacked_image,
-                              color=self.workflow.frames.color, avoid_overwriting=False,
-                              header=self.configuration.global_parameters_version)
+            save_frame_image(filename, self.workflow.stack_frames.stacked_image,
+                             color=self.workflow.frames.color, avoid_overwriting=False,
+                             header=self.configuration.global_parameters_version)
 
     def place_holder_manual_activity(self, activity):
         # Ask the user for confirmation.

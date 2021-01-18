@@ -29,11 +29,34 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from cv2 import meanStdDev
 from numpy import array, full
+import os
 
+from concurrent_proc import get_executor
 from configuration import Configuration
 from exceptions import ArgumentError, NotSupportedError, Error
 from frames import Frames
 from miscellaneous import Miscellaneous
+from concurrent import futures
+
+
+def ranker_non_laplacian(frame_index, frames, configuration, method):
+    frame = frames.frames_mono_blurred(frame_index)
+    if configuration.frames_normalization:
+        result = (meanStdDev(frame)[1][0][0] /
+                  frames.average_brightness(frame_index))
+    else:
+        result = method(frame, configuration.rank_frames_pixel_stride)
+    return frame_index, result
+
+
+def ranker_laplacian(frame_index, frames, configuration, method):
+    frame = frames.frames_mono_blurred_laplacian(frame_index)
+    if configuration.frames_normalization:
+        result = (method(frame, configuration.rank_frames_pixel_stride) /
+                  frames.average_brightness(frame_index))
+    else:
+        result = meanStdDev(frame)[1][0][0]
+    return frame_index, result
 
 
 class RankFrames(object):
@@ -99,35 +122,31 @@ class RankFrames(object):
             self.frames.reset_index_translation()
 
         # For all frames compute the quality with the selected method.
-        if method != Miscellaneous.local_contrast_laplace:
-            for frame_index in range(self.number_original):
-                frame = self.frames.frames_mono_blurred(frame_index)
-                if self.progress_signal is not None and frame_index % self.signal_step_size == 1:
+        self.frame_ranks_original = [-1.0] * self.number_original
+        with get_executor(self.configuration) as executor:
+            if method != Miscellaneous.local_contrast_laplace:
+                process_frame_rank = ranker_non_laplacian
+            else:
+                process_frame_rank = ranker_laplacian
+
+            wait_for = [
+                executor.submit(process_frame_rank, frame_index, self.frames, self.configuration, method)
+                for frame_index in range(self.number_original)
+            ]
+            completion_count = 0
+            for f in futures.as_completed(wait_for):
+                if self.progress_signal is not None and completion_count % self.signal_step_size == 1:
                     self.progress_signal.emit("Rank all frames",
-                                              int(round(10*frame_index / self.number_original) * 10))
-                if self.configuration.frames_normalization:
-                    self.frame_ranks_original.append(
-                        method(frame, self.configuration.rank_frames_pixel_stride) /
-                        self.frames.average_brightness(frame_index))
-                else:
-                    self.frame_ranks_original.append(
-                        method(frame, self.configuration.rank_frames_pixel_stride))
-        else:
-            for frame_index in range(self.number_original):
-                frame = self.frames.frames_mono_blurred_laplacian(frame_index)
-                # self.frame_ranks.append(mean((frame - frame.mean())**2))
-                if self.progress_signal is not None and frame_index % self.signal_step_size == 1:
-                    self.progress_signal.emit("Rank all frames",
-                                              int(round(10*frame_index / self.number_original) * 10))
-                if self.configuration.frames_normalization:
-                    self.frame_ranks_original.append(meanStdDev(frame)[1][0][0] /
-                        self.frames.average_brightness(frame_index))
-                else:
-                    self.frame_ranks_original.append(meanStdDev(frame)[1][0][0])
+                                              int(round(10 * completion_count / self.number_original) * 10))
+
+                completion_count += 1
+                frame_index, result = f.result()
+                self.frame_ranks_original[frame_index] = result
 
         # Sort the frame indices in descending order of quality.
         self.quality_sorted_indices_original = sorted(range(self.number_original),
-                                             key=self.frame_ranks_original.__getitem__, reverse=True)
+                                                      key=self.frame_ranks_original.__getitem__,
+                                                      reverse=True)
 
         # Compute the inverse index list: For each frame the rank_index is the corresponding index
         # in the sorted frame_ranks list.

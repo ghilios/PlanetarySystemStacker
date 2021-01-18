@@ -642,7 +642,7 @@ class ImageReader(object):
         try:
             self.frame_count = len(self.file_path_list)
 
-            self.last_frame_read = Frames.read_image(self.file_path_list[0])
+            self.last_frame_read = read_frame_image(self.file_path_list[0])
 
             if self.convert_to_grayscale:
                 self.last_frame_read = cvtColor(self.last_frame_read, COLOR_RGB2GRAY)
@@ -703,7 +703,7 @@ class ImageReader(object):
         # A new frame has to be read. First check if the index is not out of bounds.
         if 0 <= self.last_read < self.frame_count:
             try:
-                self.last_frame_read = Frames.read_image(self.file_path_list[self.last_read])
+                self.last_frame_read = read_frame_image(self.file_path_list[self.last_read])
                 if self.convert_to_grayscale:
                     self.last_frame_read = cvtColor(self.last_frame_read, COLOR_RGB2GRAY)
             except Exception as ex:
@@ -737,7 +737,7 @@ class ImageReader(object):
         self.opened = False
 
 
-class Calibration(QtCore.QObject):
+class CalibrationData(object):
     """
     This class performs the dark / flat calibration of frames. Master frames are created from
     video files or image directories. Flats, darks and the stacking input must match in terms of
@@ -754,7 +754,7 @@ class Calibration(QtCore.QObject):
         :param configuration: Configuration object with parameters
         """
 
-        super(Calibration, self).__init__()
+        super(CalibrationData, self).__init__()
         self.configuration = configuration
         self.warn_message = None
         self.reset_masters()
@@ -871,7 +871,7 @@ class Calibration(QtCore.QObject):
         # Create the master frame or read it from a file.
         if load_from_file:
             try:
-                self.master_dark_frame = Frames.read_image(dark_name)
+                self.master_dark_frame = read_frame_image(dark_name)
             except Exception as e:
                 self.report_calibration_error_signal.emit("Error: " + str(e))
                 return
@@ -921,7 +921,7 @@ class Calibration(QtCore.QObject):
         # Create the master frame or read it from a file.
         if load_from_file:
             try:
-                self.master_flat_frame = Frames.read_image(flat_name)
+                self.master_flat_frame = read_frame_image(flat_name)
             except Exception as e:
                 self.report_calibration_error_signal.emit("Error: " + str(e))
                 return
@@ -1049,6 +1049,48 @@ class Calibration(QtCore.QObject):
                 0., self.high_value).astype(self.dtype)
 
 
+class Calibration(QtCore.QObject):
+    report_calibration_error_signal = QtCore.pyqtSignal(str)
+
+    def __init__(self, configuration):
+        super(Calibration, self).__init__()
+        self.data = CalibrationData(configuration)
+        self.data.reset_masters()
+
+    def reset_masters(self):
+        self.data.reset_masters()
+
+    def reset_master_dark(self):
+        self.data.reset_master_dark()
+
+    def reset_master_flat(self):
+        self.data.reset_master_flat()
+
+    def create_master(self, master_name, output_dtype=uint16):
+        return self.data.create_master(master_name, output_dtype)
+
+    def create_master_dark(self, dark_name, load_from_file=False):
+        return self.data.create_master_dark(dark_name, load_from_file)
+
+    def load_master_dark(self, dark_name):
+        self.data.load_master_dark(dark_name)
+
+    def create_master_flat(self, flat_name, load_from_file=False):
+        self.data.create_master_flat(flat_name, load_from_file)
+
+    def load_master_flat(self, flat_name):
+        self.data.load_master_flat(flat_name)
+
+    def flats_darks_match(self, color, shape):
+        return self.data.flats_darks_match(color, shape)
+
+    def adapt_dark_frame(self, frame_dtype, shift_pixels):
+        self.data.adapt_dark_frame(frame_dtype, shift_pixels)
+
+    def correct(self, frame):
+        return self.data.correct(frame)
+
+
 class Frames(object):
     """
         This object stores the image data of all frames. Four versions of the original frames are
@@ -1105,8 +1147,10 @@ class Frames(object):
         self.configuration = configuration
         self.warn_message = None
         self.names = names
-        self.calibration = calibration
-        self.progress_signal = progress_signal
+        self.calibration = calibration.data if calibration else None
+        # TODO: Add this back. Via FramesData?
+        # self.progress_signal = progress_signal
+        self.progress_signal = None
         self.type = type
         self.bayer_pattern = None
         self.bayer_option_selected = bayer_option_selected
@@ -1642,130 +1686,129 @@ class Frames(object):
         # For every frame initialize the list with used alignment points.
         self.used_alignment_points = [[] for index in range(self.number)]
 
-    @staticmethod
-    def save_image(filename, image, color=False, avoid_overwriting=True,
-                   header="PlanetarySystemStacker"):
-        """
-        Save an image to a file. If "avoid_overwriting" is set to False, images can have either
-        ".png", ".tiff" or ".fits" format.
+def save_frame_image(filename, image, color=False, avoid_overwriting=True,
+                     header="PlanetarySystemStacker"):
+    """
+    Save an image to a file. If "avoid_overwriting" is set to False, images can have either
+    ".png", ".tiff" or ".fits" format.
+    :param filename: Name of the file where the image is to be written
+    :param image: ndarray object containing the image data
+    :param color: If True, a three channel RGB image is to be saved. Otherwise, it is assumed
+                  that the image is monochrome.
+    :param avoid_overwriting: If True, append a string to the input name if necessary so that
+                              it does not match any existing file. If False, overwrite
+                              an existing file.
+    :param header: String with information on the PSS version being used (optional).
+    :return: -
+    """
 
-        :param filename: Name of the file where the image is to be written
-        :param image: ndarray object containing the image data
-        :param color: If True, a three channel RGB image is to be saved. Otherwise, it is assumed
-                      that the image is monochrome.
-        :param avoid_overwriting: If True, append a string to the input name if necessary so that
-                                  it does not match any existing file. If False, overwrite
-                                  an existing file.
-        :param header: String with information on the PSS version being used (optional).
-        :return: -
-        """
+    # Handle the special case of .fits files first.
+    if Path(filename).suffix == '.fits':
+        # Flip image horizontally to preserve orientation
+        image = flip(image, 0)
+        if color:
+            image = moveaxis(image, -1, 0)
+        hdu = fits.PrimaryHDU(image)
+        hdu.header['CREATOR'] = header
+        hdu.writeto(filename, overwrite=True)
 
-        # Handle the special case of .fits files first.
-        if Path(filename).suffix == '.fits':
-            # Flip image horizontally to preserve orientation
-            image = flip(image, 0)
-            if color:
-                image = moveaxis(image, -1, 0)
-            hdu = fits.PrimaryHDU(image)
-            hdu.header['CREATOR'] = header
-            hdu.writeto(filename, overwrite=True)
-
-        # Not a .fits file, the name can either point to a file or a directory, or be new.
-        else:
-            if Path(filename).is_dir():
-                # If a directory with the given name already exists, append the word "_file".
-                filename += '_file'
-                if avoid_overwriting:
-                    while True:
-                        if not Path(filename + '.png').exists():
-                            break
-                        filename += '_file'
-                    filename += '.png'
-                else:
-                    filename += '.png'
-                    if Path(filename).is_file():
-                        remove(filename)
-
-            # It is a file.
-            elif Path(filename).is_file():
-                # If overwriting is to be avoided, try to append "_copy" to its basename.
-                # If it still exists, repeat.
-                if avoid_overwriting:
-                    suffix = Path(filename).suffix
-                    while True:
-                        p = Path(filename)
-                        filename = Path.joinpath(p.parents[0], p.stem + '_copy' + suffix)
-                        if not Path(filename).exists():
-                            break
-                # File may be overwritten. Delete it first.
-                else:
+    # Not a .fits file, the name can either point to a file or a directory, or be new.
+    else:
+        if Path(filename).is_dir():
+            # If a directory with the given name already exists, append the word "_file".
+            filename += '_file'
+            if avoid_overwriting:
+                while True:
+                    if not Path(filename + '.png').exists():
+                        break
+                    filename += '_file'
+                filename += '.png'
+            else:
+                filename += '.png'
+                if Path(filename).is_file():
                     remove(filename)
 
-            # It is a new name. If it does not have a file suffix, add the default '.png'.
+        # It is a file.
+        elif Path(filename).is_file():
+            # If overwriting is to be avoided, try to append "_copy" to its basename.
+            # If it still exists, repeat.
+            if avoid_overwriting:
+                suffix = Path(filename).suffix
+                while True:
+                    p = Path(filename)
+                    filename = Path.joinpath(p.parents[0], p.stem + '_copy' + suffix)
+                    if not Path(filename).exists():
+                        break
+            # File may be overwritten. Delete it first.
             else:
-                # If the file name is new and has no suffix, add ".png".
-                if not Path(filename).suffix:
-                    filename += '.png'
+                remove(filename)
 
-            if Path(filename).suffix not in ['.tiff', '.png']:
-                raise TypeError("Attempt to write image format other than '.tiff' or '.png'")
-
-            # Write the image to the file. Before writing, convert the internal RGB representation
-            # into the BGR representation assumed by OpenCV.
-            if color:
-                imwrite(str(filename), cvtColor(image, COLOR_RGB2BGR))
-            else:
-                imwrite(str(filename), image)
-
-    @staticmethod
-    def read_image(filename):
-        """
-        Read an image (in tiff, fits, png or jpg format) from a file.
-
-        :param filename: Path name of the input image.
-        :return: RGB or monochrome image.
-        """
-
-        name, suffix = splitext(filename)
-
-        # Make sure files with extensions written in large print can be read as well.
-        suffix = suffix.lower()
-
-        # Case FITS format:
-        if suffix in ('.fit', '.fits'):
-            image = fits.getdata(filename)
-
-            # FITS output file from AS3 is 16bit depth file, even though BITPIX
-            # has been set to "-32", which would suggest "numpy.float32"
-            # https://docs.astropy.org/en/stable/io/fits/usage/image.html
-            # To process this data in PSS, do "round()" and convert numpy array to "np.uint16"
-            if image.dtype == '>f4':
-                image = image.round().astype(uint16)
-
-            # If color image, move axis to be able to process the content
-            if len(image.shape) == 3:
-                image = moveaxis(image, 0, -1).copy()
-
-            # Flip image horizontally to recover original orientation
-            image = flip(image, 0)
-
-        # Case other supported image formats:
-        elif suffix in ('.tiff', '.tif', '.png', '.jpg'):
-            input_image = imread(filename, IMREAD_UNCHANGED)
-            if input_image is None:
-                raise IOError("Cannot read image file. Possible cause: Path contains non-ascii characters")
-
-            # If color image, convert to RGB mode.
-            if len(input_image.shape) == 3:
-                image = cvtColor(input_image, COLOR_BGR2RGB)
-            else:
-                image = input_image
-
+        # It is a new name. If it does not have a file suffix, add the default '.png'.
         else:
-            raise TypeError("Attempt to read image format other than 'tiff', 'tif',"
-                            " '.png', '.jpg' or 'fit', 'fits'")
+            # If the file name is new and has no suffix, add ".png".
+            if not Path(filename).suffix:
+                filename += '.png'
 
-        return image
+        if Path(filename).suffix not in ['.tiff', '.png']:
+            raise TypeError("Attempt to write image format other than '.tiff' or '.png'")
+
+        # Write the image to the file. Before writing, convert the internal RGB representation
+        # into the BGR representation assumed by OpenCV.
+        if color:
+            imwrite(str(filename), cvtColor(image, COLOR_RGB2BGR))
+        else:
+            imwrite(str(filename), image)
+
+
+def read_frame_image(filename):
+    """
+    Read an image (in tiff, fits, png or jpg format) from a file.
+
+    :param filename: Path name of the input image.
+    :return: RGB or monochrome image.
+    """
+
+    name, suffix = splitext(filename)
+
+    # Make sure files with extensions written in large print can be read as well.
+    suffix = suffix.lower()
+
+    # Case FITS format:
+    if suffix in ('.fit', '.fits'):
+        image = fits.getdata(filename)
+
+        # FITS output file from AS3 is 16bit depth file, even though BITPIX
+        # has been set to "-32", which would suggest "numpy.float32"
+        # https://docs.astropy.org/en/stable/io/fits/usage/image.html
+        # To process this data in PSS, do "round()" and convert numpy array to "np.uint16"
+        if image.dtype == '>f4':
+            image = image.round().astype(uint16)
+
+        # If color image, move axis to be able to process the content
+        if len(image.shape) == 3:
+            image = moveaxis(image, 0, -1).copy()
+
+        # Flip image horizontally to recover original orientation
+        image = flip(image, 0)
+
+    # Case other supported image formats:
+    elif suffix in ('.tiff', '.tif', '.png', '.jpg'):
+        input_image = imread(filename, IMREAD_UNCHANGED)
+        if input_image is None:
+            raise IOError("Cannot read image file. Possible cause: Path contains non-ascii characters")
+
+        # If color image, convert to RGB mode.
+        if len(input_image.shape) == 3:
+            image = cvtColor(input_image, COLOR_BGR2RGB)
+        else:
+            image = input_image
+
+    else:
+        raise TypeError("Attempt to read image format other than 'tiff', 'tif',"
+                        " '.png', '.jpg' or 'fit', 'fits'")
+
+    return image
+
 
 def access_pattern(frames_object, average_frame_percent):
     """
@@ -1919,4 +1962,4 @@ if __name__ == "__main__":
         plt.imshow(frame, cmap='gray')
     plt.show()
 
-    Frames.save_image('frame_1776.png', frame, color=True)
+    save_frame_image('frame_1776.png', frame, color=True)
