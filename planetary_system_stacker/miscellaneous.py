@@ -24,6 +24,8 @@ from datetime import datetime
 from os import unlink
 from sys import stdout
 from time import time, sleep
+from dataclasses import dataclass
+from typing import List
 
 from cv2 import CV_32F, Laplacian, VideoWriter_fourcc, VideoWriter, FONT_HERSHEY_SIMPLEX, LINE_AA, \
     putText, GaussianBlur, cvtColor, COLOR_BGR2HSV, COLOR_HSV2BGR, BORDER_DEFAULT, meanStdDev,\
@@ -38,6 +40,400 @@ from numpy.linalg import solve
 from scipy.ndimage import sobel
 
 from exceptions import DivideByZeroError, ArgumentError, Error
+
+
+@dataclass(frozen=True)
+class MultilevelCorrelationResult:
+    shift_y_local_first_phase: float
+    shift_x_local_first_phase: float
+    success_first_phase: float
+    shift_y_local_second_phase: float
+    shift_x_local_second_phase: float
+    success_second_phase: float
+
+
+def multilevel_correlation(reference_box_first_phase, frame_mono_blurred,
+                           blurr_strength_first_phase, reference_box_second_phase,
+                           y_low, y_high, x_low, x_high, search_width,
+                           weight_matrix_first_phase=None, subpixel_solve=False) -> MultilevelCorrelationResult:
+    """
+    Determine the local warp shift at an alignment point using a multi-level approach based on
+    normalized cross correlation. The first level uses a pixel grid which is coarser by a factor
+    of two in both coordinate directions. The second level uses the original pixel grid.
+    An additional noise reduction is applied on the first level as chosen by the corresponding
+    blurring parameter.
+
+    The global search width is split between the two phases: A fixed search width of 4 is used
+    in the second phase (only for local corrections). Therefore, a width of (search_width-4)
+    in each coordinate direction remains for the first phase.
+
+    In both phases it is determined if the optimum is attained on the border of the search
+    area. If so, the correlation is regarded as unsuccessful (because the real optimum may be
+    outside of the search area).
+
+    :param reference_box_first_phase: Image box with stride 2 around alignment point in the
+                                      locally sharpest frame. A Gaussian filter with strength
+                                      "blurr_strength_first_phase" has been applied.
+    :param frame_mono_blurred: Given frame (stride 1) for which the local shift at the alignment
+                               point is to be computed. This is the Gaussian blurred version of
+                               the monochrome frame as computed in class "frames".
+    :param blurr_strength_first_phase: Additional Gaussian blur strength to be applied to
+                                       images in the first phase.
+    :param reference_box_second_phase: Image box with stride 1 around alignment point in the
+                                       locally sharpest frame.
+
+    :param y_low: Lower y coordinate limit of box in given frame, taking into account the
+                  global shift and the different sizes of the mean frame and the original
+                  frames.
+    :param y_high: Upper y coordinate limit.
+    :param x_low: Lower x coordinate limit.
+    :param x_high: Upper x coordinate limit.
+    :param search_width: Maximum distance in y and x from origin of the search area. (See the
+                         comment in the explanatory text above.)
+    :param weight_matrix_first_phase: This parameter (if not None) may give a weighting array
+                                      by which the cross correlation results are multiplied
+                                      before the maximum value is determined. The size of this
+                                      2D array in each coordinate direction is that of the
+                                      reference_box_first_phase plus two times the first phase
+                                      search width (see below).
+    :param subpixel_solve: If True, in the second phase the optimum is computed with
+                           sub-pixel accuracy (i.e. the returned shifts are not integer).
+                           If False, shifts are computed as integer values.
+
+    :return: (shift_y_local_first_phase, shift_x_local_first_phase, success_first_phase,
+              shift_y_local_second_phase, shift_x_local_second_phase, success_second_phase)
+              with:
+              shift_y_local_first_phase: Local y warp shift determined in first phase
+                                         (expressed in terms of the original pixel grid).
+              shift_x_local_first_phase: Local x warp shift determined in first phase.
+              success_first_phase: "True" if the optimum was attained in the interior of the
+                                   search domain. "False" otherwise.
+              shift_y_local_second_phase: Local y warp shift determined in second phase.
+              shift_x_local_second_phase: Local x warp shift determined in second phase.
+              success_second_phase: "True" if the optimum was attained in the interior of the
+                                   search domain. "False" otherwise.
+    """
+
+    # The optimization in the second phase is only meant for local fine grid adjustments.
+    search_width_second_phase = 4
+
+    # In the first phase the largest part of the local warp is detected. Divide the search
+    # width by two because the first phase uses a coarser pixel grid.
+    search_width_first_phase = int((search_width - search_width_second_phase) / 2)
+
+    # Define a window around the alignment point box. Extend the window in each coordinate
+    # direction. This defines the search space for the template matching. Coarsen the grid
+    # by a factor of two and apply an additional Gaussian blur.
+    index_extension = search_width_first_phase * 2
+    frame_window_first_phase = GaussianBlur(frame_mono_blurred[
+                                            y_low - index_extension:y_high + index_extension:2,
+                                            x_low - index_extension:x_high + index_extension:2],
+                                            (blurr_strength_first_phase,
+                                             blurr_strength_first_phase), 0)
+
+    # Compute the normalized cross correlation.
+    result = matchTemplate((frame_window_first_phase).astype(float32),
+                           reference_box_first_phase.astype(float32), TM_CCORR_NORMED)
+
+    # Determine the position of the maximum correlation and compute the corresponding warp
+    # shift. The factor of 2 transforms the shift to the fine pixel grid. If a non-trivial
+    # weight matrix is specified, multiply the results before looking for the maximum position.
+    if weight_matrix_first_phase is not None:
+        minVal, maxVal, minLoc, maxLoc = minMaxLoc(result * weight_matrix_first_phase)
+    else:
+        minVal, maxVal, minLoc, maxLoc = minMaxLoc(result)
+    shift_y_local_first_phase = (search_width_first_phase - maxLoc[1]) * 2
+    shift_x_local_first_phase = (search_width_first_phase - maxLoc[0]) * 2
+
+    # The first phase is regarded as successful if the maximum correlation was attained in the
+    # interior of the search space.
+    success_first_phase = abs(shift_y_local_first_phase) != index_extension and abs(
+        shift_x_local_first_phase) != index_extension
+
+    # If the first phase was successful, add a second phase with a local search on the finest
+    # (original) pixel grid.
+    if success_first_phase:
+
+        # Define the search window for the second phase. Apply the shift found in the
+        # first phase.
+        y_lo = y_low - shift_y_local_first_phase - search_width_second_phase
+        y_hi = y_high - shift_y_local_first_phase + search_width_second_phase
+        x_lo = x_low - shift_x_local_first_phase - search_width_second_phase
+        x_hi = x_high - shift_x_local_first_phase + search_width_second_phase
+
+        # Cut out the frame window for the second phase (fine grid) correlation.
+        frame_window_second_phase = frame_mono_blurred[y_lo:y_hi, x_lo:x_hi]
+
+        # Perform the template matching on the fine grid, again using normalized cross
+        # correlation.
+        result = matchTemplate(frame_window_second_phase.astype(float32),
+                               reference_box_second_phase, TM_CCORR_NORMED)
+
+        # Find the position of the local optimum and compute the corresponding shift values.
+        minVal, maxVal, minLoc, maxLoc = minMaxLoc(result)
+        shift_y_local_second_phase = search_width_second_phase - maxLoc[1]
+        shift_x_local_second_phase = search_width_second_phase - maxLoc[0]
+
+        # Again, the second phase is deemed successful only if the optimum was attained in the
+        # interior of the search space.
+        success_second_phase = abs(
+            shift_y_local_second_phase) != search_width_second_phase and abs(
+            shift_x_local_second_phase) != search_width_second_phase
+
+        # If the second phase was not successful, set the corresponding shifts to zero.
+        if not success_second_phase:
+            shift_y_local_second_phase = shift_x_local_second_phase = 0
+        # The following code computes the sub-pixel shift correction to be used in drizzling.
+        elif subpixel_solve:
+            # Cut a 3x3 window around the optimum from the matching results.
+            surroundings = result[maxLoc[1] - 1:maxLoc[1] + 2, maxLoc[0] - 1:maxLoc[0] + 2]
+            try:
+                # Compute the correction to the center position. Only if the found sub-pixel
+                # correction is within the 3x3 box, it is trusted (and used).
+                y_corr, x_corr = Miscellaneous.sub_pixel_solve(surroundings)
+                if abs(y_corr) <= 1. and abs(x_corr) <= 1.:
+                    shift_y_local_second_phase -= y_corr
+                    shift_x_local_second_phase -= x_corr
+            except:
+                # print ("Subpixel solve not successful")
+                pass
+
+    # If the first phase was unsuccessful, drop the second phase and set all warp shifts to 0.
+    else:
+        success_second_phase = False
+        shift_y_local_first_phase = shift_x_local_first_phase = shift_y_local_second_phase = \
+            shift_x_local_second_phase = 0
+
+    return MultilevelCorrelationResult(
+        shift_y_local_first_phase=shift_y_local_first_phase,
+        shift_x_local_first_phase=shift_x_local_first_phase,
+        success_first_phase=success_first_phase,
+        shift_y_local_second_phase=shift_y_local_second_phase,
+        shift_x_local_second_phase=shift_x_local_second_phase,
+        success_second_phase=success_second_phase
+    )
+
+
+@dataclass(frozen=True)
+class SearchLocalMatchResult:
+    shift_y: float
+    shift_x: float
+    dev_r: List[float]
+
+
+def search_local_match(reference_box, frame, y_low, y_high, x_low, x_high, search_width,
+                       sampling_stride, sub_pixel=True) -> SearchLocalMatchResult:
+    """
+    Try shifts in y, x between the box around the alignment point in the mean frame and the
+    corresponding box in the given frame. Start with shifts [0, 0] and move out in a circular
+    fashion, until the radius "search_width" is reached. The global frame shift is accounted for
+    beforehand already.
+
+    :param reference_box: Image box around alignment point in mean frame.
+    :param frame: Given frame for which the local shift at the alignment point is to be
+                  computed.
+    :param y_low: Lower y coordinate limit of box in given frame, taking into account the
+                  global shift and the different sizes of the mean frame and the original
+                  frames.
+    :param y_high: Upper y coordinate limit
+    :param x_low: Lower x coordinate limit
+    :param x_high: Upper x coordinate limit
+    :param search_width: Maximum radius of the search spiral
+    :param sampling_stride: Stride in both coordinate directions used in computing deviations
+    :param sub_pixel: If True, compute local shifts with sub-pixel accuracy
+    :return: ([shift_y, shift_x], [min_r]) with:
+               shift_y, shift_x: shift values of minimum or [0, 0] if no optimum could be found.
+               [dev_r]: list of minimum deviations for radius r=0 ... r_max, where r_max is the
+                        widest search radius tested.
+    """
+
+    # Initialize the global optimum with an impossibly large value.
+    deviation_min = 1.e30
+    dy_min = None
+    dx_min = None
+
+    # Initialize list of minimum deviations for each search radius and field of deviations.
+    dev_r = []
+    deviations = zeros((2 * search_width + 1, 2 * search_width + 1))
+
+    # Start with shift [0, 0] and proceed in a circular pattern.
+    for r in arange(search_width + 1):
+
+        # Create an enumerator which produces shift values [dy, dx] in a circular pattern
+        # with radius "r".
+        circle_r = Miscellaneous.circle_around(0, 0, r)
+
+        # Initialize the optimum for radius "r" to an impossibly large value,
+        # and the corresponding shifts to None.
+        deviation_min_r, dy_min_r, dx_min_r = 1.e30, None, None
+
+        # Go through the circle with radius "r" and compute the difference (deviation)
+        # between the shifted frame and the corresponding box in the mean frame. Find the
+        # minimum "deviation_min_r" for radius "r".
+        if sampling_stride != 1:
+            for (dy, dx) in circle_r:
+                deviation = abs(
+                    reference_box[::sampling_stride, ::sampling_stride] - frame[
+                                  y_low - dy:y_high - dy:sampling_stride,
+                                  x_low - dx:x_high - dx:sampling_stride]).sum()
+                # deviation = sqrt(square(
+                #     reference_box - frame[y_low - dy:y_high - dy, x_low - dx:x_high - dx]).sum())
+                if deviation < deviation_min_r:
+                    deviation_min_r, dy_min_r, dx_min_r = deviation, dy, dx
+                deviations[dy + search_width, dx + search_width] = deviation
+        else:
+            for (dy, dx) in circle_r:
+                deviation = abs(
+                    reference_box - frame[y_low - dy:y_high - dy, x_low - dx:x_high - dx]).sum()
+                if deviation < deviation_min_r:
+                    deviation_min_r, dy_min_r, dx_min_r = deviation, dy, dx
+                deviations[dy + search_width, dx + search_width] = deviation
+
+        # Append the minimal deviation for radius r to list of minima.
+        dev_r.append(deviation_min_r)
+
+        # If for the current radius there is no improvement compared to the previous radius,
+        # the optimum is reached.
+        if deviation_min_r >= deviation_min:
+
+            # For sub-pixel accuracy, find local minimum of fitting paraboloid.
+            if sub_pixel:
+                try:
+                    y_correction, x_correction = Miscellaneous.sub_pixel_solve(deviations[
+                           dy_min + search_width - 1: dy_min + search_width + 2,
+                           dx_min + search_width - 1: dx_min + search_width + 2])
+                except DivideByZeroError as ex:
+                    print(ex.message)
+                    x_correction = y_correction = 0.
+
+                # Add the sub-pixel correction to the local shift. If the correction is above
+                # one pixel, something went wrong.
+                if abs(y_correction) < 1. and abs(x_correction) < 1.:
+                    dy_min += y_correction
+                    dx_min += x_correction
+                # else:
+                #     print ("y_correction: " + str(y_correction) + ", x_correction: " +
+                #           str(x_correction))
+
+            return SearchLocalMatchResult(shift_x=dx_min, shift_y=dy_min, dev_r=dev_r)
+
+        # Otherwise, update the current optimum and continue.
+        else:
+            deviation_min, dy_min, dx_min = deviation_min_r, dy_min_r, dx_min_r
+
+    # If within the maximum search radius no optimum could be found, return [0, 0].
+    return SearchLocalMatchResult(shift_x=0, shift_y=0, dev_r=dev_r)
+
+
+def search_local_match_gradient(reference_box, frame, y_low, y_high, x_low, x_high, search_width,
+                                sampling_stride, dev_table) -> SearchLocalMatchResult:
+    """
+    Try shifts in y, x between the box around the alignment point in the mean frame and the
+    corresponding box in the given frame. Start with shifts [0, 0] and move out in steps until
+    a local optimum is reached. In each step try all positions with distance 1 in y and/or x
+    from the optimum found in the previous step (steepest descent). The global frame shift is
+    accounted for beforehand already.
+
+    :param reference_box: Image box around alignment point in mean frame.
+    :param frame: Given frame for which the local shift at the alignment point is to be
+                  computed.
+    :param y_low: Lower y coordinate limit of box in given frame, taking into account the
+                  global shift and the different sizes of the mean frame and the original
+                  frames.
+    :param y_high: Upper y coordinate limit
+    :param x_low: Lower x coordinate limit
+    :param x_high: Upper x coordinate limit
+    :param search_width: Maximum distance in y and x from origin of the search area
+    :param sampling_stride: Stride in both coordinate directions used in computing deviations
+    :param dev_table: Scratch table to be used internally for storing intermediate results,
+                      size: [2*search_width, 2*search_width], dtype=float32.
+    :return: ([shift_y, shift_x], [min_r]) with:
+               shift_y, shift_x: shift values of minimum or [0, 0] if no optimum could be found.
+               [dev_r]: list of minimum deviations for all steps until a local minimum is found.
+    """
+
+    # Set up a table which keeps deviation values from earlier iteration steps. This way,
+    # deviation evaluations can be avoided at coordinates which have been visited before.
+    # Initialize deviations with an impossibly high value.
+    dev_table[:, :] = 1.e30
+
+    # Initialize the global optimum with the value at dy=dx=0.
+    if sampling_stride != 1:
+        deviation_min = abs(reference_box[::sampling_stride, ::sampling_stride] - frame[
+                                      y_low:y_high:sampling_stride,
+                                      x_low:x_high:sampling_stride]).sum()
+    else:
+        deviation_min = abs(reference_box - frame[y_low:y_high, x_low:x_high]).sum()
+    dev_table[0, 0] = deviation_min
+    dy_min = 0
+    dx_min = 0
+
+    counter_new = 0
+    counter_reused = 0
+
+    # Initialize list of minimum deviations for each search radius.
+    dev_r = [deviation_min]
+
+    # Start with shift [0, 0]. Stop when a circle with radius 1 around the current optimum
+    # reaches beyond the search area.
+    while max(abs(dy_min), abs(dx_min)) < search_width-1:
+
+        # Create an enumerator which produces shift values [dy, dx] in a circular pattern
+        # with radius 1 around the current optimum [dy_min, dx_min].
+        circle_1 = Miscellaneous.circle_around(dy_min, dx_min, 1)
+
+        # Initialize the optimum for the new circle to an impossibly large value,
+        # and the corresponding shifts to None.
+        deviation_min_1, dy_min_1, dx_min_1 = 1.e30, None, None
+
+        # Go through the circle with radius 1 and compute the difference (deviation)
+        # between the shifted frame and the corresponding box in the mean frame. Find the
+        # minimum "deviation_min_1".
+        if sampling_stride != 1:
+            for (dy, dx) in circle_1:
+                deviation = dev_table[dy, dx]
+                if deviation > 1.e29:
+                    counter_new += 1
+                    deviation = abs(reference_box[::sampling_stride, ::sampling_stride] - frame[
+                                      y_low - dy:y_high - dy:sampling_stride,
+                                      x_low - dx:x_high - dx:sampling_stride]).sum()
+                    dev_table[dy, dx] = deviation
+                else:
+                    counter_reused += 1
+                if deviation < deviation_min_1:
+                    deviation_min_1, dy_min_1, dx_min_1 = deviation, dy, dx
+
+                # deviation = abs(reference_box[::sampling_stride, ::sampling_stride] - frame[
+                #                   y_low - dy:y_high - dy:sampling_stride,
+                #                   x_low - dx:x_high - dx:sampling_stride]).sum()
+                # if deviation < deviation_min_1:
+                #     deviation_min_1, dy_min_1, dx_min_1 = deviation, dy, dx
+        else:
+            for (dy, dx) in circle_1:
+                deviation = dev_table[dy, dx]
+                if deviation > 1.e29:
+                    deviation = abs(
+                        reference_box - frame[y_low - dy:y_high - dy,
+                                        x_low - dx:x_high - dx]).sum()
+                    dev_table[dy, dx] = deviation
+                if deviation < deviation_min_1:
+                    deviation_min_1, dy_min_1, dx_min_1 = deviation, dy, dx
+
+        # Append the minimal deviation found in this step to list of minima.
+        dev_r.append(deviation_min_1)
+
+        # If for the current center the match is better than for all neighboring points, a
+        # local optimum is found.
+        if deviation_min_1 >= deviation_min:
+            # print ("new: " + str(counter_new) + ", reused: " + str(counter_reused))
+            return SearchLocalMatchResult(shift_x=dx_min, shift_y=dy_min, dev_r=dev_r)
+
+        # Otherwise, update the current optimum and continue.
+        else:
+            deviation_min, dy_min, dx_min = deviation_min_1, dy_min_1, dx_min_1
+
+    # If within the maximum search radius no optimum could be found, return [0, 0].
+    return SearchLocalMatchResult(shift_x=0, shift_y=0, dev_r=dev_r)
 
 
 class Miscellaneous(object):
@@ -197,266 +593,6 @@ class Miscellaneous(object):
             tx -= shape[1]
 
         return [ty, tx]
-
-    @staticmethod
-    def multilevel_correlation(reference_box_first_phase, frame_mono_blurred,
-                               blurr_strength_first_phase, reference_box_second_phase,
-                               y_low, y_high, x_low, x_high, search_width,
-                               weight_matrix_first_phase=None, subpixel_solve=False):
-        """
-        Determine the local warp shift at an alignment point using a multi-level approach based on
-        normalized cross correlation. The first level uses a pixel grid which is coarser by a factor
-        of two in both coordinate directions. The second level uses the original pixel grid.
-        An additional noise reduction is applied on the first level as chosen by the corresponding
-        blurring parameter.
-
-        The global search width is split between the two phases: A fixed search width of 4 is used
-        in the second phase (only for local corrections). Therefore, a width of (search_width-4)
-        in each coordinate direction remains for the first phase.
-
-        In both phases it is determined if the optimum is attained on the border of the search
-        area. If so, the correlation is regarded as unsuccessful (because the real optimum may be
-        outside of the search area).
-
-        :param reference_box_first_phase: Image box with stride 2 around alignment point in the
-                                          locally sharpest frame. A Gaussian filter with strength
-                                          "blurr_strength_first_phase" has been applied.
-        :param frame_mono_blurred: Given frame (stride 1) for which the local shift at the alignment
-                                   point is to be computed. This is the Gaussian blurred version of
-                                   the monochrome frame as computed in class "frames".
-        :param blurr_strength_first_phase: Additional Gaussian blur strength to be applied to
-                                           images in the first phase.
-        :param reference_box_second_phase: Image box with stride 1 around alignment point in the
-                                           locally sharpest frame.
-
-        :param y_low: Lower y coordinate limit of box in given frame, taking into account the
-                      global shift and the different sizes of the mean frame and the original
-                      frames.
-        :param y_high: Upper y coordinate limit.
-        :param x_low: Lower x coordinate limit.
-        :param x_high: Upper x coordinate limit.
-        :param search_width: Maximum distance in y and x from origin of the search area. (See the
-                             comment in the explanatory text above.)
-        :param weight_matrix_first_phase: This parameter (if not None) may give a weighting array
-                                          by which the cross correlation results are multiplied
-                                          before the maximum value is determined. The size of this
-                                          2D array in each coordinate direction is that of the
-                                          reference_box_first_phase plus two times the first phase
-                                          search width (see below).
-        :param subpixel_solve: If True, in the second phase the optimum is computed with
-                               sub-pixel accuracy (i.e. the returned shifts are not integer).
-                               If False, shifts are computed as integer values.
-
-        :return: (shift_y_local_first_phase, shift_x_local_first_phase, success_first_phase,
-                  shift_y_local_second_phase, shift_x_local_second_phase, success_second_phase)
-                  with:
-                  shift_y_local_first_phase: Local y warp shift determined in first phase
-                                             (expressed in terms of the original pixel grid).
-                  shift_x_local_first_phase: Local x warp shift determined in first phase.
-                  success_first_phase: "True" if the optimum was attained in the interior of the
-                                       search domain. "False" otherwise.
-                  shift_y_local_second_phase: Local y warp shift determined in second phase.
-                  shift_x_local_second_phase: Local x warp shift determined in second phase.
-                  success_second_phase: "True" if the optimum was attained in the interior of the
-                                       search domain. "False" otherwise.
-        """
-
-        # The optimization in the second phase is only meant for local fine grid adjustments.
-        search_width_second_phase = 4
-
-        # In the first phase the largest part of the local warp is detected. Divide the search
-        # width by two because the first phase uses a coarser pixel grid.
-        search_width_first_phase = int((search_width - search_width_second_phase) / 2)
-
-        # Define a window around the alignment point box. Extend the window in each coordinate
-        # direction. This defines the search space for the template matching. Coarsen the grid
-        # by a factor of two and apply an additional Gaussian blur.
-        index_extension = search_width_first_phase * 2
-        frame_window_first_phase = GaussianBlur(frame_mono_blurred[
-                                                y_low - index_extension:y_high + index_extension:2,
-                                                x_low - index_extension:x_high + index_extension:2],
-                                                (blurr_strength_first_phase,
-                                                 blurr_strength_first_phase), 0)
-
-        # Compute the normalized cross correlation.
-        result = matchTemplate((frame_window_first_phase).astype(float32),
-                               reference_box_first_phase.astype(float32), TM_CCORR_NORMED)
-
-        # Determine the position of the maximum correlation and compute the corresponding warp
-        # shift. The factor of 2 transforms the shift to the fine pixel grid. If a non-trivial
-        # weight matrix is specified, multiply the results before looking for the maximum position.
-        if weight_matrix_first_phase is not None:
-            minVal, maxVal, minLoc, maxLoc = minMaxLoc(result * weight_matrix_first_phase)
-        else:
-            minVal, maxVal, minLoc, maxLoc = minMaxLoc(result)
-        shift_y_local_first_phase = (search_width_first_phase - maxLoc[1]) * 2
-        shift_x_local_first_phase = (search_width_first_phase - maxLoc[0]) * 2
-
-        # The first phase is regarded as successful if the maximum correlation was attained in the
-        # interior of the search space.
-        success_first_phase = abs(shift_y_local_first_phase) != index_extension and abs(
-            shift_x_local_first_phase) != index_extension
-
-        # If the first phase was successful, add a second phase with a local search on the finest
-        # (original) pixel grid.
-        if success_first_phase:
-
-            # Define the search window for the second phase. Apply the shift found in the
-            # first phase.
-            y_lo = y_low - shift_y_local_first_phase - search_width_second_phase
-            y_hi = y_high - shift_y_local_first_phase + search_width_second_phase
-            x_lo = x_low - shift_x_local_first_phase - search_width_second_phase
-            x_hi = x_high - shift_x_local_first_phase + search_width_second_phase
-
-            # Cut out the frame window for the second phase (fine grid) correlation.
-            frame_window_second_phase = frame_mono_blurred[y_lo:y_hi, x_lo:x_hi]
-
-            # Perform the template matching on the fine grid, again using normalized cross
-            # correlation.
-            result = matchTemplate(frame_window_second_phase.astype(float32),
-                                   reference_box_second_phase, TM_CCORR_NORMED)
-
-            # Find the position of the local optimum and compute the corresponding shift values.
-            minVal, maxVal, minLoc, maxLoc = minMaxLoc(result)
-            shift_y_local_second_phase = search_width_second_phase - maxLoc[1]
-            shift_x_local_second_phase = search_width_second_phase - maxLoc[0]
-
-            # Again, the second phase is deemed successful only if the optimum was attained in the
-            # interior of the search space.
-            success_second_phase = abs(
-                shift_y_local_second_phase) != search_width_second_phase and abs(
-                shift_x_local_second_phase) != search_width_second_phase
-
-            # If the second phase was not successful, set the corresponding shifts to zero.
-            if not success_second_phase:
-                shift_y_local_second_phase = shift_x_local_second_phase = 0
-            # The following code computes the sub-pixel shift correction to be used in drizzling.
-            elif subpixel_solve:
-                # Cut a 3x3 window around the optimum from the matching results.
-                surroundings = result[maxLoc[1]-1:maxLoc[1]+2, maxLoc[0]-1:maxLoc[0]+2]
-                try:
-                    # Compute the correction to the center position. Only if the found sub-pixel
-                    # correction is within the 3x3 box, it is trusted (and used).
-                    y_corr, x_corr = Miscellaneous.sub_pixel_solve(surroundings)
-                    if abs(y_corr) <= 1. and abs(x_corr) <= 1.:
-                        shift_y_local_second_phase -= y_corr
-                        shift_x_local_second_phase -= x_corr
-                except:
-                    # print ("Subpixel solve not successful")
-                    pass
-
-        # If the first phase was unsuccessful, drop the second phase and set all warp shifts to 0.
-        else:
-            success_second_phase = False
-            shift_y_local_first_phase = shift_x_local_first_phase = shift_y_local_second_phase = \
-                shift_x_local_second_phase = 0
-
-        return shift_y_local_first_phase, shift_x_local_first_phase, success_first_phase, \
-               shift_y_local_second_phase, shift_x_local_second_phase, success_second_phase
-
-    @staticmethod
-    def search_local_match(reference_box, frame, y_low, y_high, x_low, x_high, search_width,
-                           sampling_stride, sub_pixel=True):
-        """
-        Try shifts in y, x between the box around the alignment point in the mean frame and the
-        corresponding box in the given frame. Start with shifts [0, 0] and move out in a circular
-        fashion, until the radius "search_width" is reached. The global frame shift is accounted for
-        beforehand already.
-
-        :param reference_box: Image box around alignment point in mean frame.
-        :param frame: Given frame for which the local shift at the alignment point is to be
-                      computed.
-        :param y_low: Lower y coordinate limit of box in given frame, taking into account the
-                      global shift and the different sizes of the mean frame and the original
-                      frames.
-        :param y_high: Upper y coordinate limit
-        :param x_low: Lower x coordinate limit
-        :param x_high: Upper x coordinate limit
-        :param search_width: Maximum radius of the search spiral
-        :param sampling_stride: Stride in both coordinate directions used in computing deviations
-        :param sub_pixel: If True, compute local shifts with sub-pixel accuracy
-        :return: ([shift_y, shift_x], [min_r]) with:
-                   shift_y, shift_x: shift values of minimum or [0, 0] if no optimum could be found.
-                   [dev_r]: list of minimum deviations for radius r=0 ... r_max, where r_max is the
-                            widest search radius tested.
-        """
-
-        # Initialize the global optimum with an impossibly large value.
-        deviation_min = 1.e30
-        dy_min = None
-        dx_min = None
-
-        # Initialize list of minimum deviations for each search radius and field of deviations.
-        dev_r = []
-        deviations = zeros((2 * search_width + 1, 2 * search_width + 1))
-
-        # Start with shift [0, 0] and proceed in a circular pattern.
-        for r in arange(search_width + 1):
-
-            # Create an enumerator which produces shift values [dy, dx] in a circular pattern
-            # with radius "r".
-            circle_r = Miscellaneous.circle_around(0, 0, r)
-
-            # Initialize the optimum for radius "r" to an impossibly large value,
-            # and the corresponding shifts to None.
-            deviation_min_r, dy_min_r, dx_min_r = 1.e30, None, None
-
-            # Go through the circle with radius "r" and compute the difference (deviation)
-            # between the shifted frame and the corresponding box in the mean frame. Find the
-            # minimum "deviation_min_r" for radius "r".
-            if sampling_stride != 1:
-                for (dy, dx) in circle_r:
-                    deviation = abs(
-                        reference_box[::sampling_stride, ::sampling_stride] - frame[
-                                      y_low - dy:y_high - dy:sampling_stride,
-                                      x_low - dx:x_high - dx:sampling_stride]).sum()
-                    # deviation = sqrt(square(
-                    #     reference_box - frame[y_low - dy:y_high - dy, x_low - dx:x_high - dx]).sum())
-                    if deviation < deviation_min_r:
-                        deviation_min_r, dy_min_r, dx_min_r = deviation, dy, dx
-                    deviations[dy + search_width, dx + search_width] = deviation
-            else:
-                for (dy, dx) in circle_r:
-                    deviation = abs(
-                        reference_box - frame[y_low - dy:y_high - dy, x_low - dx:x_high - dx]).sum()
-                    if deviation < deviation_min_r:
-                        deviation_min_r, dy_min_r, dx_min_r = deviation, dy, dx
-                    deviations[dy + search_width, dx + search_width] = deviation
-
-            # Append the minimal deviation for radius r to list of minima.
-            dev_r.append(deviation_min_r)
-
-            # If for the current radius there is no improvement compared to the previous radius,
-            # the optimum is reached.
-            if deviation_min_r >= deviation_min:
-
-                # For sub-pixel accuracy, find local minimum of fitting paraboloid.
-                if sub_pixel:
-                    try:
-                        y_correction, x_correction = Miscellaneous.sub_pixel_solve(deviations[
-                               dy_min + search_width - 1: dy_min + search_width + 2,
-                               dx_min + search_width - 1: dx_min + search_width + 2])
-                    except DivideByZeroError as ex:
-                        print(ex.message)
-                        x_correction = y_correction = 0.
-
-                    # Add the sub-pixel correction to the local shift. If the correction is above
-                    # one pixel, something went wrong.
-                    if abs(y_correction) < 1. and abs(x_correction) < 1.:
-                        dy_min += y_correction
-                        dx_min += x_correction
-                    # else:
-                    #     print ("y_correction: " + str(y_correction) + ", x_correction: " +
-                    #           str(x_correction))
-
-                return [dy_min, dx_min], dev_r
-
-            # Otherwise, update the current optimum and continue.
-            else:
-                deviation_min, dy_min, dx_min = deviation_min_r, dy_min_r, dx_min_r
-
-        # If within the maximum search radius no optimum could be found, return [0, 0].
-        return [0, 0], dev_r
 
     # Define the matrix used in method "sub_pixel_solve" to solve the normal equations. It is
     # computed once and for all as "inv(a_transpose * a) * a_transpose". Using this matrix, the
@@ -653,117 +789,6 @@ class Miscellaneous(object):
             else:
                 deviation_min = deviation_min_r
                 index_min = index_min_r
-
-        # If within the maximum search radius no optimum could be found, return [0, 0].
-        return [0, 0], dev_r
-
-    @staticmethod
-    def search_local_match_gradient(reference_box, frame, y_low, y_high, x_low, x_high, search_width,
-                           sampling_stride, dev_table):
-        """
-        Try shifts in y, x between the box around the alignment point in the mean frame and the
-        corresponding box in the given frame. Start with shifts [0, 0] and move out in steps until
-        a local optimum is reached. In each step try all positions with distance 1 in y and/or x
-        from the optimum found in the previous step (steepest descent). The global frame shift is
-        accounted for beforehand already.
-
-        :param reference_box: Image box around alignment point in mean frame.
-        :param frame: Given frame for which the local shift at the alignment point is to be
-                      computed.
-        :param y_low: Lower y coordinate limit of box in given frame, taking into account the
-                      global shift and the different sizes of the mean frame and the original
-                      frames.
-        :param y_high: Upper y coordinate limit
-        :param x_low: Lower x coordinate limit
-        :param x_high: Upper x coordinate limit
-        :param search_width: Maximum distance in y and x from origin of the search area
-        :param sampling_stride: Stride in both coordinate directions used in computing deviations
-        :param dev_table: Scratch table to be used internally for storing intermediate results,
-                          size: [2*search_width, 2*search_width], dtype=float32.
-        :return: ([shift_y, shift_x], [min_r]) with:
-                   shift_y, shift_x: shift values of minimum or [0, 0] if no optimum could be found.
-                   [dev_r]: list of minimum deviations for all steps until a local minimum is found.
-        """
-
-        # Set up a table which keeps deviation values from earlier iteration steps. This way,
-        # deviation evaluations can be avoided at coordinates which have been visited before.
-        # Initialize deviations with an impossibly high value.
-        dev_table[:, :] = 1.e30
-
-        # Initialize the global optimum with the value at dy=dx=0.
-        if sampling_stride != 1:
-            deviation_min = abs(reference_box[::sampling_stride, ::sampling_stride] - frame[
-                                          y_low:y_high:sampling_stride,
-                                          x_low:x_high:sampling_stride]).sum()
-        else:
-            deviation_min = abs(reference_box - frame[y_low:y_high, x_low:x_high]).sum()
-        dev_table[0, 0] = deviation_min
-        dy_min = 0
-        dx_min = 0
-
-        counter_new = 0
-        counter_reused = 0
-
-        # Initialize list of minimum deviations for each search radius.
-        dev_r = [deviation_min]
-
-        # Start with shift [0, 0]. Stop when a circle with radius 1 around the current optimum
-        # reaches beyond the search area.
-        while max(abs(dy_min), abs(dx_min)) < search_width-1:
-
-            # Create an enumerator which produces shift values [dy, dx] in a circular pattern
-            # with radius 1 around the current optimum [dy_min, dx_min].
-            circle_1 = Miscellaneous.circle_around(dy_min, dx_min, 1)
-
-            # Initialize the optimum for the new circle to an impossibly large value,
-            # and the corresponding shifts to None.
-            deviation_min_1, dy_min_1, dx_min_1 = 1.e30, None, None
-
-            # Go through the circle with radius 1 and compute the difference (deviation)
-            # between the shifted frame and the corresponding box in the mean frame. Find the
-            # minimum "deviation_min_1".
-            if sampling_stride != 1:
-                for (dy, dx) in circle_1:
-                    deviation = dev_table[dy, dx]
-                    if deviation > 1.e29:
-                        counter_new += 1
-                        deviation = abs(reference_box[::sampling_stride, ::sampling_stride] - frame[
-                                          y_low - dy:y_high - dy:sampling_stride,
-                                          x_low - dx:x_high - dx:sampling_stride]).sum()
-                        dev_table[dy, dx] = deviation
-                    else:
-                        counter_reused += 1
-                    if deviation < deviation_min_1:
-                        deviation_min_1, dy_min_1, dx_min_1 = deviation, dy, dx
-
-                    # deviation = abs(reference_box[::sampling_stride, ::sampling_stride] - frame[
-                    #                   y_low - dy:y_high - dy:sampling_stride,
-                    #                   x_low - dx:x_high - dx:sampling_stride]).sum()
-                    # if deviation < deviation_min_1:
-                    #     deviation_min_1, dy_min_1, dx_min_1 = deviation, dy, dx
-            else:
-                for (dy, dx) in circle_1:
-                    deviation = dev_table[dy, dx]
-                    if deviation > 1.e29:
-                        deviation = abs(
-                            reference_box - frame[y_low - dy:y_high - dy,
-                                            x_low - dx:x_high - dx]).sum()
-                        dev_table[dy, dx] = deviation
-                    if deviation < deviation_min_1:
-                        deviation_min_1, dy_min_1, dx_min_1 = deviation, dy, dx
-
-            # Append the minimal deviation found in this step to list of minima.
-            dev_r.append(deviation_min_1)
-
-            # If for the current center the match is better than for all neighboring points, a
-            # local optimum is found.
-            if deviation_min_1 >= deviation_min:
-                # print ("new: " + str(counter_new) + ", reused: " + str(counter_reused))
-                return [dy_min, dx_min], dev_r
-
-            # Otherwise, update the current optimum and continue.
-            else:
-                deviation_min, dy_min, dx_min = deviation_min_1, dy_min_1, dx_min_1
 
         # If within the maximum search radius no optimum could be found, return [0, 0].
         return [0, 0], dev_r

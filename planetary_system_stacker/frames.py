@@ -26,6 +26,8 @@ from os import path, remove, listdir, stat
 from os.path import splitext
 from pathlib import Path
 from time import time
+from dataclasses import dataclass
+from typing import Optional
 
 from PyQt5 import QtCore
 from astropy.io import fits
@@ -1091,6 +1093,54 @@ class Calibration(QtCore.QObject):
         return self.data.correct(frame)
 
 
+@dataclass(frozen=True)
+class BufferingConfig:
+    buffer_original: bool
+    buffer_monochrome: bool
+    buffer_gaussian: bool
+    buffer_laplacian: bool
+
+
+def _determine_buffering(buffering_level: int) -> BufferingConfig:
+    """
+    Decide on the objects to be buffered, depending on "buffering_level" configuration
+    parameter. For each frame, four versions can be buffered or not:
+    buffer_original: If "True", read the original frame data only once, otherwise
+                     read them again if required.
+    buffer_monochrome: If "True", compute the monochrome image only once, otherwise
+                       compute it again if required.
+    buffer_gaussian: If "True", compute the gaussian-blurred image only once, otherwise
+                     compute it again if required.
+    buffer_laplacian: If "True", compute the "Laplacian of Gaussian" only once, otherwise
+                      compute it again if required.
+
+    :param buffering_level: Level of buffering for original frames and image variants.
+    :return: Tuple with four booleans defining for each image version if it is to be buffered or
+             not
+
+    """
+
+    buffer_original = False
+    buffer_monochrome = False
+    buffer_gaussian = False
+    buffer_laplacian = False
+
+    if buffering_level > 0:
+        buffer_laplacian = True
+    if buffering_level > 1:
+        buffer_gaussian = True
+    if buffering_level > 2:
+        buffer_original = True
+    if buffering_level > 3:
+        buffer_monochrome = True
+
+    return BufferingConfig(
+        buffer_laplacian=buffer_laplacian,
+        buffer_gaussian=buffer_gaussian,
+        buffer_original=buffer_original,
+        buffer_monochrome=buffer_monochrome)
+
+
 class Frames(object):
     """
         This object stores the image data of all frames. Four versions of the original frames are
@@ -1125,7 +1175,7 @@ class Frames(object):
     """
 
     def __init__(self, configuration, names, type='video', bayer_option_selected="Auto detect color",
-                 calibration=None, progress_signal=None, buffering_level=2):
+                 calibration=None, buffering_level=2):
         """
         Initialize the Frame object, and read all images. Images can be stored in a video file or
         as single images in a directory.
@@ -1138,9 +1188,6 @@ class Frames(object):
                               "RGB", "BGR", "Force Bayer RGGB", "Force Bayer GRBG",
                                "Force Bayer GBRG", "Force Bayer BGGR".
         :param calibration: (Optional) calibration object for darks/flats correction.
-        :param progress_signal: Either None (no progress signalling), or a signal with the signature
-                                (str, int) with the current activity (str) and the progress in
-                                percent (int).
         :param buffering_level: Level of buffering for original frames and image variants.
         """
 
@@ -1148,19 +1195,11 @@ class Frames(object):
         self.warn_message = None
         self.names = names
         self.calibration = calibration.data if calibration else None
-        # TODO: Add this back. Via FramesData?
-        # self.progress_signal = progress_signal
-        self.progress_signal = None
         self.type = type
         self.bayer_pattern = None
         self.bayer_option_selected = bayer_option_selected
         self.shift_pixels = None
-
-        self.buffer_original = None
-        self.buffer_monochrome = None
-        self.buffer_gaussian = None
-        self.buffer_laplacian = None
-        self.set_buffering(buffering_level)
+        self.buffering_config = _determine_buffering(buffering_level)
 
         # In non-buffered mode, the index of the image just read/computed is stored for re-use.
         self.original_available = None
@@ -1230,16 +1269,16 @@ class Frames(object):
         else:
             raise ArgumentError("Invalid color selected for channel extraction")
         self.frames_monochrome = [None] * self.number_original
-        self.frames_monochrome_blurred = [None] *self.number_original
-        self.frames_monochrome_blurred_laplacian = [None] *self.number_original
+        self.frames_monochrome_blurred = [None] * self.number_original
+        self.frames_monochrome_blurred_laplacian = [None] * self.number_original
         if self.configuration.frames_normalization:
-            self.frames_average_brightness = [None] *self.number_original
+            self.frames_average_brightness = [None] * self.number_original
         else:
             self.frames_average_brightness = None
         self.first_monochrome_index = None
         self.used_alignment_points = None
 
-    def set_buffering(self, buffering_level):
+    def set_buffering(self, buffering_level: int):
         """
         Set the buffering flags for original image data and its variants depending on the buffering
         level selected.
@@ -1248,46 +1287,9 @@ class Frames(object):
         :return: -
         """
 
-        self.buffer_original, self.buffer_monochrome, self.buffer_gaussian, self.buffer_laplacian =\
-            Frames.decide_buffering(buffering_level)
+        self.buffering_config = _determine_buffering(buffering_level)
 
-    @staticmethod
-    def decide_buffering(buffering_level):
-        """
-        Decide on the objects to be buffered, depending on "buffering_level" configuration
-        parameter. For each frame, four versions can be buffered or not:
-        buffer_original: If "True", read the original frame data only once, otherwise
-                         read them again if required.
-        buffer_monochrome: If "True", compute the monochrome image only once, otherwise
-                           compute it again if required.
-        buffer_gaussian: If "True", compute the gaussian-blurred image only once, otherwise
-                         compute it again if required.
-        buffer_laplacian: If "True", compute the "Laplacian of Gaussian" only once, otherwise
-                          compute it again if required.
-
-        :param buffering_level: Level of buffering for original frames and image variants.
-        :return: Tuple with four booleans defining for each image version if it is to be buffered or
-                 not
-
-        """
-
-        buffer_original = False
-        buffer_monochrome = False
-        buffer_gaussian = False
-        buffer_laplacian = False
-
-        if buffering_level > 0:
-            buffer_laplacian = True
-        if buffering_level > 1:
-            buffer_gaussian = True
-        if buffering_level > 2:
-            buffer_original = True
-        if buffering_level > 3:
-            buffer_monochrome = True
-
-        return buffer_original, buffer_monochrome, buffer_gaussian, buffer_laplacian
-
-    def compute_required_buffer_size(self, buffering_level):
+    def compute_required_buffer_size(self, buffering_level: int):
         """
         Compute the RAM required to store original images and their derivatives, and other objects
         which scale with the image size.
@@ -1313,6 +1315,8 @@ class Frames(object):
         :return: Number of required buffer space in bytes.
         """
 
+        buffering_config = _determine_buffering(buffering_level)
+
         # Compute the number of image pixels.
         number_pixel = self.shape[0] * self.shape[1]
 
@@ -1329,20 +1333,17 @@ class Frames(object):
         image_size_gaussian_bytes = number_pixel * 2
 
         # Compute the size of a "Laplacian of Gaussian" in bytes. Remember that it is down-sampled.
-        image_size_laplacian_bytes = number_pixel / \
-                                     self.configuration.align_frames_sampling_stride ** 2
+        image_size_laplacian_bytes = number_pixel / self.configuration.align_frames_sampling_stride ** 2
 
         # Compute the buffer space per image, based on the buffering level.
-        buffer_original, buffer_monochrome, buffer_gaussian, buffer_laplacian = \
-            Frames.decide_buffering(buffering_level)
         buffer_per_image = 0
-        if buffer_original:
+        if buffering_config.buffer_original:
             buffer_per_image += image_size_bytes
-        if buffer_monochrome:
+        if buffering_config.buffer_monochrome:
             buffer_per_image += image_size_monochrome_bytes
-        if buffer_gaussian:
+        if buffering_config.buffer_gaussian:
             buffer_per_image += image_size_gaussian_bytes
-        if buffer_laplacian:
+        if buffering_config.buffer_laplacian:
             buffer_per_image += image_size_laplacian_bytes
 
         # Multiply with the total number of frames.
@@ -1358,11 +1359,12 @@ class Frames(object):
         # Return the total buffer space required.
         return (buffer_for_all_images + buffer_additional_workspace) / 1e9
 
-    def frames(self, index):
+    def frames(self, index, progress_signal: Optional[QtCore.pyqtSignal] = None):
         """
         Read or look up the original frame object with a given index.
 
         :param index: Frame index
+        :param progress_signal: Optional progress signal. Used to show progress if buffering original frames is enabled
         :return: Frame with index "index".
         """
 
@@ -1381,13 +1383,13 @@ class Frames(object):
         # If the original frames are to be buffered, read them in one go at the first call to this
         # method. In this case, a progress bar is displayed in the main GUI.
         if self.frames_original is None:
-            if self.buffer_original:
+            if self.buffering_config.buffer_original:
                 self.frames_original = []
-                self.signal_step_size = max(int(self.number_original / 10), 1)
+                signal_step_size = max(int(self.number_original / 10), 1)
                 for frame_index in range(self.number_original):
                     # After every "signal_step_size"th frame, send a progress signal to the main GUI.
-                    if self.progress_signal is not None and frame_index % self.signal_step_size == 1:
-                        self.progress_signal.emit("Read all frames",
+                    if progress_signal is not None and frame_index % signal_step_size == 1:
+                        progress_signal.emit("Read all frames",
                                                   int(round(10 * frame_index / self.number_original) * 10))
                     # Read the next frame. If dark/flat correction is active, do the corrections.
                     if self.calibration_matches:
@@ -1397,8 +1399,8 @@ class Frames(object):
                         self.frames_original.append(self.reader.read_frame(frame_index))
 
                 self.reader.close()
-                if self.progress_signal is not None:
-                    self.progress_signal.emit("Read all frames", 100)
+                if progress_signal is not None:
+                    progress_signal.emit("Read all frames", 100)
 
             # If original frames are not buffered, initialize an empty frame list, so frames can be
             # read later in non-consecutive order.
@@ -1406,7 +1408,7 @@ class Frames(object):
                 self.frames_original = [None] * self.number_original
 
         # The original frames are buffered. Just return the frame.
-        if self.buffer_original:
+        if self.buffering_config.buffer_original:
             return self.frames_original[index_original]
 
         # This frame has been cached. Just return it.
@@ -1417,15 +1419,15 @@ class Frames(object):
         # the corrections.
         else:
             if self.calibration_matches:
-                frame = self.calibration.correct(self.reader.read_frame(index_original))
+                this_frame = self.calibration.correct(self.reader.read_frame(index_original))
             else:
-                frame = self.reader.read_frame(index_original)
+                this_frame = self.reader.read_frame(index_original)
 
             # Cache the frame just read.
-            self.original_available = frame
+            self.original_available = this_frame
             self.original_available_index = index_original
 
-            return frame
+            return this_frame
 
     def frames_mono(self, index):
         """
@@ -1501,7 +1503,7 @@ class Frames(object):
                                   THRESH_TOZERO)[1])[0] + 1.e-10
 
             # If the monochrome frames are buffered, store it at the current index.
-            if self.buffer_monochrome:
+            if self.buffering_config.buffer_monochrome:
                 self.frames_monochrome[index_original] = frame_mono
 
             # If frames are not buffered, cache the current frame.
@@ -1555,7 +1557,7 @@ class Frames(object):
                                                      self.configuration.frames_gauss_width), 0)
 
             # If the blurred frames are buffered, store the current frame at the current index.
-            if self.buffer_gaussian:
+            if self.buffering_config.buffer_gaussian:
                 self.frames_monochrome_blurred[index_original] = frame_monochrome_blurred
 
             # If frames are not buffered, cache the current frame.
@@ -1605,7 +1607,7 @@ class Frames(object):
                 alpha=self.alpha)
 
             # If the blurred frames are buffered, store the current frame at the current index.
-            if self.buffer_laplacian:
+            if self.buffering_config.buffer_laplacian:
                 self.frames_monochrome_blurred_laplacian[index_original] = frame_monochrome_laplacian
 
             # If frames are not buffered, cache the current frame.
@@ -1685,6 +1687,7 @@ class Frames(object):
 
         # For every frame initialize the list with used alignment points.
         self.used_alignment_points = [[] for index in range(self.number)]
+
 
 def save_frame_image(filename, image, color=False, avoid_overwriting=True,
                      header="PlanetarySystemStacker"):

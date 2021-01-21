@@ -53,7 +53,8 @@ class StackFrames(object):
 
     """
 
-    def __init__(self, configuration, frames, rank_frames, align_frames, alignment_points, my_timer,
+    def __init__(self, configuration: Configuration, frames: Frames, rank_frames: RankFrames, align_frames: AlignFrames,
+                 alignment_points: AlignmentPoints, my_timer: timer,
                  progress_signal=None, debug=False, create_image_window_signal=None,
                  update_image_window_signal=None, terminate_image_window_signal=None):
         """
@@ -342,10 +343,10 @@ class StackFrames(object):
             # If brightness normalization is switched on, change the brightness of this frame to
             # the median of all frames.
             if self.configuration.frames_normalization:
-                frame = self.frames.frames(frame_index) * median_brightness / \
+                frame = self.frames.frames(frame_index, progress_signal=self.progress_signal) * median_brightness / \
                         (self.frames.average_brightness(frame_index) + 1.e-7)
             else:
-                frame = self.frames.frames(frame_index)
+                frame = self.frames.frames(frame_index, progress_signal=self.progress_signal)
 
             # Change the current frame into float32. If drizzle is active, also interpolate values.
             if self.drizzle:

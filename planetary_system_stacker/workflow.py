@@ -345,8 +345,7 @@ class Workflow(QtCore.QObject):
 
                 self.frames = Frames(self.configuration, names, type=self.job.type,
                                      bayer_option_selected=self.job.bayer_option_selected,
-                                     calibration=self.calibration,
-                                     progress_signal=self.work_current_progress_signal)
+                                     calibration=self.calibration)
 
                 # If buffering is not automatic, set the buffering_level as requested by the user.
                 if self.configuration.global_parameters_buffering_level != -1:
